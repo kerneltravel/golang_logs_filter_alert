@@ -23,3 +23,7 @@ $ export GOARCH=amd64
 
 编译得到的 logalert.exe 文件可以命令方式运行
 需配置文件 config.ini
+
+
+*License*
+MIT
