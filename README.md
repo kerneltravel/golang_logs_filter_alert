@@ -1,3 +1,5 @@
+[中文说明](https://github.com/kerneltravel/golang_logs_filter_alert/blob/main/README.zh_CN.md)
+
 * Project goals & functions:
 
 1. to monitor multiple logs files on client side and in realtime filter out the valuable logs to upload for log-alerting, by only upload the filter log , making the ETL happen in client side, so the log serverside need fewer space for the dirty-useless logs .
