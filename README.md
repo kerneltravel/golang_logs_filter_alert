@@ -1,35 +1,34 @@
-* 功能
+* Project goals & functions:
 
-监控日志文件变化，过滤出感兴趣的内容（不在白名单内的都属于待告警的内容）并发送告警。基于golang实现的，支持正则匹配，在配置文件中自定义匹配规则。
+1. to monitor multiple logs files on client side and in realtime filter out the valuable logs to upload for log-alerting, by only upload the filter log , making the ETL happen in client side, so the log serverside need fewer space for the dirty-useless logs .
 
+2. client can batch monitor log file name by regex-pattern.(current not support newly created log file)
 
-* 编译
-
-windows 下编译：  
+* How to compile
+on windows:
 ```
 go mod init logalert
 go mod tidy
 go build .
 ```
 
-[可选]
-windows下minGW命令方式编译得到 适合linux的可执行文件：
+[Optional] Cross compile
+on windows minGW cross-compile to linux biary by go.
 ```
 $ export CGO_ENABLED=0
 $ export GOOS=linux
 $ export GOARCH=amd64
 ```
+* Usage
+1. edit config.ini file, set WhiteListFrom URL, which contains the filtered pattern list.
+2. start the logalert.exe in background by supervisor or other tools.
 
-* 运行方式
+* Plans
+1. to support auto monitor newly generated log file, with out restarting programs.
+2. to send log to cloud log-server , e.g. the tencent CLS and aliyun SLS log-server.
 
-1. 需配置文件 config.ini （日志接收端的验证信息配置、 WhiteListFrom 对应的告警白名单内容的URL 地址准备）
-2. 然后将编译得到的 logalert.exe 文件可以命令方式在后台运行。 
-
-
-* 功能计划
-
-1. 对指定目录下后续新产生的日志文件，也能被加入监控，而无需重启软件。
 
 * License
 
 [MIT License](https://github.com/duthied/Free-Friendika/blob/master/LICENSE)
+
