@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,43 +14,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gookit/ini"
+	"github.com/go-ini/ini"
+	//_ "github.com/mkevac/debugcharts"
 	"github.com/nxadm/tail"
+	cls "github.com/tencentcloud/tencentcloud-cls-sdk-go"
+	//"net/http/pprof"
+	// pprof "runtime/pprof"
 )
-
-/* 需改进成从外部动态读取最新白名单规则列表，作为 okLogRules的规则内容（只要有这些单词的就认为改日志条目无需告警）
-var okLogRules = []string{
-	`请登录`,
-	`转存成功`,
-	`paramsLogs`,
-	`add_credit`,
-	`testtemp`,
-	`newCommCount`,
-	`listCount`,
-	`unzip`,
-	`commCount`,
-	`resLogs`,
-	`user\/getPrivateSwitch`,
-	`ETag`,
-	`Allready Exist in COS`,
-	`SSL_do_handshake`,
-	`php_network_getaddresses`,
-	`\.well-known\/`,
-}
-*/
-
-/*
-从 local_config.ini 读取对应日志的配置
-*/
-type LogFileConfig struct {
-	// File-specifc
-	LogType        string
-	LogPath        string
-	ParentPath     string
-	DatetimeFormat string
-	WhiteListFrom  string
-	IsNewFileDaily bool
-}
 
 /*
 返回指定字符串（当前日志行内容）是否包含特定【日期 时间】 格式的内容，
@@ -66,11 +38,7 @@ func currentLineContainDatetime(currentLine, DatetimeFormat string) (bool, strin
 	}
 	//根据规则提取关键信息
 	timeStr := reg1.FindString(currentLine)
-	if len(timeStr) > 0 { //字符串为【】包裹的日期时间串
-		//timeStr = strings.Replace(timeStr, "【", "", -1)
-		//timeStr = strings.Replace(timeStr, "】", "", -1)
-		//fmt.Println("old line is:", currentLine, "log datetime is：", timeStr)
-
+	if len(timeStr) > 0 {
 		return true, timeStr
 	} else {
 		return false, ""
@@ -111,18 +79,26 @@ func needAlert(oldlines string, okLogRules *[]string) bool {
 */
 func doAlert_sendmsg(oldlines, datetimevalue, logPath string) (bool, string) {
 	//TODO: 改成发送消息到redis或其他消息存储后端，以集中记录错误日志，进一步可以告警
+	send_alert_to_tencent_cls_log(oldlines, datetimevalue, logPath, true)
+
 	fmt.Println("Alert:", logPath, oldlines, datetimevalue)
 	return true, ""
 }
 
 //日志的log段已读取完整，如果需要告警，则在本函数发起告警
 func FinishedOldlines_processLog(oldlines, datetimevalue string, okLogRules *[]string, logPath string) {
+
 	//fmt.Println(oldlines, datetimevalue)
 	// 去掉换行， 进行白名单匹配。若不在白名单中，则返回
 	//if needAlert(strings.Join(strings.Split(oldlines, string("\n")), " ")) == true {
 	if needAlert(oldlines, okLogRules) == true {
-		//fmt.Println(logPath)
-		doAlert_sendmsg(oldlines, datetimevalue, logPath)
+		//ch := getLogChan()
+		logsListChannel <- LogBody{Mesg: oldlines, Datetime: datetimevalue, LogPath: logPath}
+		//fmt.Println("检测到新日志要发送：", logPath, datetimevalue, oldlines, "队列长度", len(logsListChannel))
+		/*
+			fmt.Println("当前队列中的日志", <-ch)
+		*/
+		//doAlert_sendmsg(oldlines, datetimevalue, logPath)
 	} else {
 
 	}
@@ -147,18 +123,77 @@ func parseLogRulesFromUrl(url string) ([]string, error) {
 /*
 从日志文件实时读取最新日志，待分析日志内容是否需要告警
 */
-func tailLogFile(logFileConfig *LogFileConfig) { //func tailLogFile(logfile, DatetimeFormat string) {
+func tailErrLogFile(logFileConfig *LogFileConfig) { //func tailLogFile(logfile, DatetimeFormat string) {
+	// 使用TailFile库从日志文件实时读取最新日志
+	logfile := logFileConfig.LogPath
+	DatetimeFormat := logFileConfig.DatetimeFormat
+	tailfile, err := tail.TailFile(
+		//"2022-10-07_logs.txt",
+		logfile,
+		//如果在windows系统，只能用Poll=true
+		tail.Config{MustExist: true, Follow: true, ReOpen: true, Poll: false, Location: &tail.SeekInfo{Offset: 2, Whence: io.SeekEnd}})
+
+	if err != nil {
+		fmt.Println("error logfile :"+logfile, err)
+		//panic(err)
+		log.Println(err, logfile, "日志文件读取失败")
+		return
+	}
+	defer tailfile.Cleanup()
+
+	oldlines := ""
+	okLogRules, err := parseLogRulesFromUrl(logFileConfig.WhiteListFrom)
+	//fmt.Println("网络获取规则内容：", okLogRules)
+
+	//TODO: 网络错误的处理
+	if err != nil {
+		fmt.Println("获取规则文件URL内容失败", err)
+		return
+	}
+
+	// 每次追加新日志的时候，会触发下面的日志分析，如果属于异常日志则告警
+	for line := range tailfile.Lines {
+
+		//忽略日志中的空行
+		if strings.Trim(line.Text, " ") == "" {
+			continue
+		}
+
+		//fmt.Println(line.Text)
+
+		//根据日志是否以【日期时间】开始，作为判断当前读取的日志属于日志的新段落还是日志的旧段落。若新段落则从空字符串开始拼接为新内容
+		if ok, datetimevalue := currentLineContainDatetime(line.Text, DatetimeFormat); ok == true {
+			//fmt.Println("datetime is  ", datetimevalue, line.Text)
+			//如果在windows系统，只能用Poll=true
+			FinishedOldlines_processLog(oldlines, datetimevalue, &okLogRules, logFileConfig.LogPath)
+			oldlines = ""
+			oldlines += fmt.Sprintf(" %s", line.Text) // 注意：这里去掉了原日志的换行
+		} else { //若为日志的旧段落，则继续拼接到之前的日志段落内容上
+			oldlines += fmt.Sprintf(" %s", line.Text) // 注意：这里去掉了原日志的换行
+		}
+	}
+}
+
+/*
+从日志文件实时读取最新日志，待分析日志内容是否需要告警
+*/
+func tailNewestLogFile(logFileConfig *LogFileConfig) { //func tailLogFile(logfile, DatetimeFormat string) {
 	// 使用TailFile库从日志文件实时读取最新日志
 	logfile := logFileConfig.LogPath
 	DatetimeFormat := logFileConfig.DatetimeFormat
 	t, err := tail.TailFile(
-		//"2022-10-07_logs.txt",
 		logfile,
-		tail.Config{MustExist: true, Follow: true, ReOpen: true})
+		//tail.Config{MustExist: true, Follow: true, ReOpen: true})
+		tail.Config{MustExist: true, Follow: true, ReOpen: true, Poll: false, Location: &tail.SeekInfo{Offset: 2, Whence: io.SeekEnd}})
 
 	if err != nil {
-		panic(err)
+		fmt.Println("TailFile error, logfile：", logfile)
+		//TODO 改成return
+		//panic(err)
+		log.Println(err, logfile, "日志文件读取失败")
+		return
 	}
+	defer t.Cleanup()
 
 	oldlines := ""
 	okLogRules, err := parseLogRulesFromUrl(logFileConfig.WhiteListFrom)
@@ -192,11 +227,47 @@ func tailLogFile(logFileConfig *LogFileConfig) { //func tailLogFile(logfile, Dat
 	}
 }
 
+/*根据query 的文件名模式，找到dirpath 目录下的指定名称的错误日志文件，
+返回： true,目标日志文件名
+       若近期无日志变化，或目录/文件不存在，则返回false,""
+*/
+func lookupTargetErrLogFile(dirpath, query string) (bool, string) {
+	ok := true
+
+	filefullpath := dirpath + query
+	if !IsDir(dirpath) || !IsFile(filefullpath) {
+		fmt.Println("指定目录或文件不存在：", dirpath, filefullpath)
+		return false, ""
+	}
+
+	/*
+		var lastTimeFile string
+		lastTimeFile = ""
+		//fmt.Println(filefullpath)
+		matches, _ := filepath.Glob(filefullpath)
+
+		for _, vfpath := range matches {
+			//fmt.Println(k, vfpath)
+			fstat, _ := os.Stat(vfpath)
+			fLastModTime := fstat.ModTime()
+			if fLastModTime.After(oldModTime) {
+				oldModTime = fLastModTime
+				lastTimeFile = vfpath
+			}
+		}
+		if lastTimeFile == "" {
+			ok = false
+		}
+		return ok, lastTimeFile
+	*/
+	return ok, filefullpath
+}
+
 /*根据query 的文件名模式，找到dirpath 目录下的最新日志文件，
 返回： true,目标日志文件名
        若近期无日志变化，则返回false,""
 */
-func lookupTargetLogFile(dirpath, query string) (bool, string) {
+func lookupNewestLogFile(dirpath, query string) (bool, string) {
 	var lastTimeFile string
 	lastTimeFile = ""
 	ok := true
@@ -232,12 +303,39 @@ func startMonitorLogFile(logFileKey string, logFileInfo map[string]string, waitG
 	defer waitGroup.Done()
 	query := logFileInfo["Pattern"]
 
-	_, logPath := lookupTargetLogFile(logFileInfo["ParentPath"], query)
+	var logPath string
+	var logType = strings.Trim(strings.ToLower(logFileInfo["LogType"]), " ")
+	switch {
+	case "runtimelog" == logType:
+		{
+			_, logPath = lookupNewestLogFile(logFileInfo["ParentPath"], query)
+		}
+	case "errorlog" == logType:
+		{
+			_, logPath = lookupTargetErrLogFile(logFileInfo["ParentPath"], query)
+		}
+	}
 
+	if strings.Trim(logPath, " ") == "" {
+		switch {
+		case "runtimelog" == logType:
+			{
+				fmt.Println("未找到匹配的日志文件。", "目录：", logFileInfo["ParentPath"], "匹配规则：", query, "时间范围：近2天内")
+			}
+		case "errorlog" == logType:
+			{
+				fmt.Println("未找到匹配的日志文件。", "目录：", logFileInfo["ParentPath"], "匹配规则：", query)
+			}
+
+		}
+		return
+	}
 	//fmt.Println("----", logFileKey, logFileInfo, ok, logPath)
 	IsNewFileDaily, err := strconv.ParseBool(logFileInfo["IsNewFileDaily"])
 	if err != nil {
-		panic(err)
+		//panic(err)
+		log.Println(err, logFileInfo, "配置文件读取失败，IsNewFileDaily 配置项读取失败")
+		return
 	}
 
 	logFileConfig := LogFileConfig{
@@ -249,49 +347,138 @@ func startMonitorLogFile(logFileKey string, logFileInfo map[string]string, waitG
 		IsNewFileDaily: IsNewFileDaily,
 	}
 
-	//tailLogFile(logPath, DatetimeFormat)
-	tailLogFile(&logFileConfig)
+	if IsNewFileDaily == true { //这种模式会要求主程序每天重启一次（以后可以改成根据时间做判断）
+		tailNewestLogFile(&logFileConfig)
+	} else { //这种模式只需要关注匹配的文件的最新末尾内容。
+		tailErrLogFile(&logFileConfig)
+	}
 }
 
-func main() {
-	configFilePath := "config.ini"
-	configFileDefault := ` 配置文件读取失败，未定义LocalServiceList ，参考配置：
+type LogBody struct {
+	Mesg     string
+	Datetime string
+	LogPath  string
+}
 
-	LocalServiceList = runtime_log,error_log
-	
-	[runtime_log]
-	ParentPath=/www/wwwroot/site.domain.com/runtime/log_path/
-	Pattern=*_runtime.log
-	IsNewFileDaily=true
-	LogType=runtimelog
-	DatetimeFormat=\d+\-\d+\-\d+ \d+\:\d+\:\d+
-	WhiteListFrom=https://rule_list_from.domain.net/whitelist.txt
-	
-	[error_log]
-	ParentPath=/www/wwwlogs/
-	Pattern=*.error.log
-	IsNewFileDaily=true
-	LogType=runtimelog
-	DatetimeFormat=\d+\-\d+\-\d+ \d+\:\d+\:\d+
-	WhiteListFrom=https://rule_list_from.domain.net/whitelist.txt
-	`
-	localConfig, err := ini.LoadExists(configFilePath)
+var clslogset TencentClsLogSetting
+var clsProducerConfig *cls.AsyncProducerClientConfig
+var clientName string
+var clsLog_enable, clsLog_isDebug bool
+var logsListChannel = make(chan LogBody, 100000)
+var error_log_output_file = "./error_log_output.txt"
+
+func getClsConfig() (*cls.AsyncProducerClientConfig, *TencentClsLogSetting) {
+	return clsProducerConfig, &clslogset
+}
+
+func getClientName() string {
+	return clientName
+}
+
+func getclsLog_enable() bool {
+	return clsLog_enable
+}
+
+func getLogChan() chan LogBody {
+	return logsListChannel
+}
+
+func consumeLog() {
+	//ch :=
+	for {
+		select {
+		//case logBody := <-getLogChan():
+		case logBody := <-logsListChannel:
+			{
+				//for s := range logBody {
+				fmt.Printf("收到消息 %v\n", logBody)
+				doAlert_sendmsg(logBody.Mesg, logBody.Datetime, logBody.LogPath)
+			}
+		default:
+			continue
+			//fmt.Println("等待日志消息……", len(logsListChannel))
+		}
+	}
+}
+
+func init() {
+	errorlogfile, err := os.Create(error_log_output_file)
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
+	}
+	log.SetOutput(errorlogfile)
+}
+func main() {
+
+	// for performence tunning
+	/*
+		f, err := os.OpenFile("profile", os.O_CREATE|os.O_RDWR, 0644)
+		if nil != err {
+			fmt.Println("pprofile 创建失败", err)
+		}
+
+		pprof.StartCPUProfile(f)
+		time.Sleep(time.Second * 10)
+		pprof.StopCPUProfile()
+		//defer pprof.StopCPUProfile()
+	*/
+	/*
+		if err := http.ListenAndServe(":6060", nil); err != nil {
+			log.Fatal(err)
+		}
+
+		profile, err := os.Create("cpuProfile")
+		defer profile.Close()
+		if err := pprof.StartCPUProfile(profile); err != nil {
+			log.Fatal("could not start cpu profile", err)
+		}
+		defer pprof.StopCPUProfile()
+	*/
+
+	configFilePath := "config.ini"
+
+	localConfig, err := ini.Load(configFilePath)
+	if err != nil {
+		//panic(err)
+		log.Fatal(err, "配置文件config.ini读取失败")
 	}
 	//fmt.Println(localConfig.Data())
-	localServiceConfig, ok := localConfig.String("LocalServiceList")
-	if !ok {
-		//fmt.Println(localServiceConfig, ok)
-		panic(localServiceConfig + configFileDefault)
+	localServiceConfig := localConfig.Section("app").Key("LocalServiceList").String()
+	clientName = localConfig.Section("app").Key("ClientName").String()
+
+	clsLog_enable, err = localConfig.Section("tencent_cls_log").Key("enable").Bool()
+	if nil != err {
+		clsLog_enable = false
+		fmt.Println(configFilePath + "配置项错误：[tencent_cls_log]enable")
+		log.Println(err, configFilePath, configFilePath+"配置项错误：[tencent_cls_log]enable")
+		return
 	}
+	clsLog_isDebug, err = localConfig.Section("tencent_cls_log").Key("debug").Bool()
+	if nil != err {
+		clsLog_isDebug = false
+		fmt.Println(configFilePath + "配置项错误：[tencent_cls_log]debug")
+		log.Println(err, configFilePath, configFilePath+"配置项错误：[tencent_cls_log]enable")
+		return
+	}
+
+	clsProducerConfig = cls.GetDefaultAsyncProducerClientConfig()
+	clslogset.Endpoint, clslogset.AccessKeyID, clslogset.AccessKeySecret, clslogset.TopicId = localConfig.Section("tencent_cls_log").Key("Endpoint").String(), localConfig.Section("tencent_cls_log").Key("AccessKeyID").String(), localConfig.Section("tencent_cls_log").Key("AccessKeySecret").String(), localConfig.Section("tencent_cls_log").Key("TopicId").String()
+
+	clsProducerConfig.Endpoint = clslogset.Endpoint
+	clsProducerConfig.AccessKeyID = clslogset.AccessKeyID
+	clsProducerConfig.AccessKeySecret = clslogset.AccessKeySecret
+
+	go consumeLog()
 
 	var wg sync.WaitGroup //WaitGroup 方式实现主线程等待子线程都完成后再退出(甚至永远运行以跟踪新日志文件)
 
-	//localServiceConfig2, ok := localConfig.StringMap("LocalServiceList")
-	//fmt.Println(localServiceConfig2, ok)
 	for _, configKey := range strings.Split(localServiceConfig, ",") {
-		logFileInfo, _ := localConfig.StringMap(configKey)
+		logFileInfo := map[string]string{}
+		keynames := localConfig.Section(configKey).KeyStrings()
+		for _, name := range keynames {
+			logFileInfo[name] = localConfig.Section(configKey).Key(name).String()
+		}
+
 		//fmt.Println(configKey, logFileInfo, ok)
 		wg.Add(1)
 		go startMonitorLogFile(configKey, logFileInfo, &wg)
@@ -299,6 +486,5 @@ func main() {
 	//测试阶段，需要启用以下代码，以防止go 调用的startMonitorLogFile() 协程 在main()退出之后才启动就无法看到协程的输出信息。
 	//time.Sleep(100 * time.Second)
 	wg.Wait() // 代替 //time.Sleep(100 * time.Second) 的方式等待协程退出
-
 	//维护说明：可每天 09:00以后和 12:00重启一次服务
 }
