@@ -19,7 +19,8 @@ import (
 	"github.com/nxadm/tail"
 	cls "github.com/tencentcloud/tencentcloud-cls-sdk-go"
 	//"net/http/pprof"
-	// pprof "runtime/pprof"
+	//pprof "runtime/pprof"
+	//"syscall"
 )
 
 /*
@@ -394,8 +395,9 @@ func consumeLog() {
 				fmt.Printf("收到消息 %v\n", logBody)
 				doAlert_sendmsg(logBody.Mesg, logBody.Datetime, logBody.LogPath)
 			}
-		default:
-			continue
+
+			//default:  // bug fix: 如果select { } 一直不匹配case logBody := <-logsListChannel，则每次都 continue，会导致cpu占用高。下面default: continue 注释掉即可。
+			//continue
 			//fmt.Println("等待日志消息……", len(logsListChannel))
 		}
 	}
@@ -408,9 +410,21 @@ func init() {
 	}
 	log.SetOutput(errorlogfile)
 }
-func main() {
 
-	// for performence tunning
+/*
+// for tracing CPU load-high bugs
+func handleCtrlC(c chan os.Signal) {
+	sig := <-c
+	// handle ctrl+c event here
+	// for example, close database
+	fmt.Println("\nsignal: ", sig)
+	pprof.StopCPUProfile()
+	time.Sleep(time.Second * 5)
+	os.Exit(0)
+}
+*/
+
+func main() {
 	/*
 		f, err := os.OpenFile("profile", os.O_CREATE|os.O_RDWR, 0644)
 		if nil != err {
@@ -422,17 +436,21 @@ func main() {
 		pprof.StopCPUProfile()
 		//defer pprof.StopCPUProfile()
 	*/
-	/*
-		if err := http.ListenAndServe(":6060", nil); err != nil {
-			log.Fatal(err)
-		}
+	/*if err := http.ListenAndServe(":6060", nil); err != nil {
+		log.Fatal(err)
+	}
+	*/
 
+	/*
+		c := make(chan os.Signal)
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 		profile, err := os.Create("cpuProfile")
 		defer profile.Close()
 		if err := pprof.StartCPUProfile(profile); err != nil {
 			log.Fatal("could not start cpu profile", err)
 		}
-		defer pprof.StopCPUProfile()
+		go handleCtrlC(c)
+		//defer pprof.StopCPUProfile()
 	*/
 
 	configFilePath := "config.ini"
